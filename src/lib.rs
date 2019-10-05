@@ -285,7 +285,7 @@ impl server::Literal for Server {
     }
 
     fn set_span(&mut self, literal: &mut Self::Literal, span: Self::Span) {
-        literal.set_span(span)
+        literal.span = span;
     }
 
     fn subspan(
@@ -411,15 +411,6 @@ impl server::Span for Server {
 }
 
 type TokenTreeT = TokenTree<Group, Punct, Ident, Literal>;
-
-fn set_tt_span(tt: &mut TokenTreeT, span: Span) {
-    match tt {
-        TokenTree::Group(t) => t.set_span(span),
-        TokenTree::Literal(t) => t.set_span(span),
-        TokenTree::Ident(t) => t.set_span(span),
-        TokenTree::Punct(t) => t.set_span(span),
-    }
-}
 
 struct TokenStreamBuilder {
     inner: Vec<TokenTreeT>,
@@ -558,12 +549,6 @@ struct Span {
     hi: u32,
 }
 
-impl Span {
-    fn call_site() -> Span {
-        Span { lo: 0, hi: 0 }
-    }
-}
-
 impl fmt::Debug for Span {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "bytes({}..{})", self.lo, self.hi)
@@ -608,10 +593,6 @@ impl fmt::Display for Group {
     }
 }
 
-/// An `Punct` is an single punctuation character like `+`, `-` or `#`.
-///
-/// Multicharacter operators like `+=` are represented as two instances of
-/// `Punct` with different forms of `Spacing` returned.
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 struct Punct {
     op: char,
@@ -620,13 +601,6 @@ struct Punct {
 }
 
 impl Punct {
-    /// Creates a new `Punct` from the given character and spacing.
-    ///
-    /// The `ch` argument must be a valid punctuation character permitted by the
-    /// language, otherwise the function will panic.
-    ///
-    /// The returned `Punct` will have the default span of `Span::call_site()`
-    /// which can be further configured with the `set_span` method below.
     fn new(op: char, spacing: Spacing, span: Span) -> Punct {
         Punct {
             op,
@@ -635,22 +609,12 @@ impl Punct {
         }
     }
 
-    /// Returns the spacing of this punctuation character, indicating whether
-    /// it's immediately followed by another `Punct` in the token stream, so
-    /// they can potentially be combined into a multicharacter operator
-    /// (`Joint`), or it's followed by some other token or whitespace (`Alone`)
-    /// so the operator has certainly ended.
     fn spacing(&self) -> Spacing {
         if self.joint {
             Spacing::Joint
         } else {
             Spacing::Alone
         }
-    }
-
-    /// Configure the span for this punctuation character.
-    fn set_span(&mut self, span: Span) {
-        self.span = span;
     }
 }
 
@@ -680,10 +644,6 @@ impl Ident {
             span,
             raw,
         }
-    }
-
-    fn set_span(&mut self, span: Span) {
-        self.span = span;
     }
 }
 
@@ -720,10 +680,6 @@ impl Literal {
         }
         text.push('"');
         Literal::new(text, span)
-    }
-
-    fn set_span(&mut self, span: Span) {
-        self.span = span;
     }
 }
 

@@ -6,7 +6,7 @@ use unicode_xid::UnicodeXID;
 use proc_macro::bridge::TokenTree;
 use proc_macro::{Delimiter, Spacing};
 
-use crate::{set_tt_span, Group, Ident, Literal, Punct, Span, TokenStream, DUMMY_SPAN};
+use crate::{Group, Ident, Literal, Punct, Span, TokenStream};
 
 type TokenTreeT = TokenTree<Group, Punct, Ident, Literal>;
 
@@ -100,6 +100,10 @@ impl<'a> Cursor<'a> {
 
     fn char_indices(&self) -> CharIndices<'a> {
         self.rest.char_indices()
+    }
+
+    fn span_to(&self, end: Cursor<'_>) -> Span {
+        Span { lo: self.off, hi: end.off }
     }
 }
 
@@ -474,25 +478,7 @@ fn is_ident_continue(c: char) -> bool {
         || (c > '\x7f' && UnicodeXID::is_xid_continue(c))
 }
 
-fn spanned<'a, T>(
-    input: Cursor<'a>,
-    f: fn(Cursor<'a>) -> PResult<'a, T>,
-) -> PResult<'a, (T, Span)> {
-    let input = skip_whitespace(input);
-    let lo = input.off;
-    let (a, b) = f(input)?;
-    let hi = a.off;
-    let span = Span { lo, hi };
-    Ok((a, (b, span)))
-}
-
-fn token_tree(input: Cursor) -> PResult<TokenTreeT> {
-    let (rest, (mut tt, span)) = spanned(input, token_kind)?;
-    set_tt_span(&mut tt, span);
-    Ok((rest, tt))
-}
-
-named!(token_kind -> TokenTreeT, alt!(
+named!(token_tree-> TokenTreeT, alt!(
     map!(group, TokenTree::Group)
     |
     map!(literal, TokenTree::Literal) // must be before symbol
@@ -502,25 +488,26 @@ named!(token_kind -> TokenTreeT, alt!(
     symbol_leading_ws
 ));
 
-named!(group -> Group, alt!(
-    delimited!(
-        punct!("("),
-        token_stream,
-        punct!(")")
-    ) => { |ts| Group::new(Delimiter::Parenthesis, ts, DUMMY_SPAN) }
-    |
-    delimited!(
-        punct!("["),
-        token_stream,
-        punct!("]")
-    ) => { |ts| Group::new(Delimiter::Bracket, ts, DUMMY_SPAN) }
-    |
-    delimited!(
-        punct!("{"),
-        token_stream,
-        punct!("}")
-    ) => { |ts| Group::new(Delimiter::Brace, ts, DUMMY_SPAN) }
-));
+fn group<'a>(input: Cursor<'a>) -> PResult<'a, Group> {
+    let input = skip_whitespace(input);
+    let (delim, end) = match input.bytes().next() {
+        Some(b'(') => (Delimiter::Parenthesis, b')'),
+        Some(b'[') => (Delimiter::Bracket, b']'),
+        Some(b'{') => (Delimiter::Brace, b'{'),
+        _ => return Err(LexError),
+    };
+    let rest = input.advance(1);
+
+    let (rest, ts) = token_stream(rest)?;
+    let rest = skip_whitespace(rest);
+
+    if rest.bytes().next() != Some(end) {
+        return Err(LexError);
+    }
+    let rest = input.advance(1);
+
+    Ok((rest, Group::new(delim, ts, input.span_to(rest))))
+}
 
 fn symbol_leading_ws(input: Cursor) -> PResult<TokenTreeT> {
     symbol(skip_whitespace(input))
@@ -532,8 +519,10 @@ fn symbol(input: Cursor) -> PResult<TokenTreeT> {
 
     let (rest, sym) = symbol_not_raw(rest)?;
 
+    let span = input.span_to(rest);
+
     if !raw {
-        let ident = Ident::new(sym, false, Span::call_site());
+        let ident = Ident::new(sym, false, span);
         return Ok((rest, TokenTree::Ident(ident)));
     }
 
@@ -541,7 +530,7 @@ fn symbol(input: Cursor) -> PResult<TokenTreeT> {
         return Err(LexError);
     }
 
-    let ident = Ident::new(sym, true, Span::call_site());
+    let ident = Ident::new(sym, true, span);
     Ok((rest, TokenTree::Ident(ident)))
 }
 
@@ -565,16 +554,14 @@ fn symbol_not_raw(input: Cursor) -> PResult<&str> {
 }
 
 fn literal(input: Cursor) -> PResult<Literal> {
-    let input_no_ws = skip_whitespace(input);
+    let input = skip_whitespace(input);
 
-    match literal_nocapture(input_no_ws) {
-        Ok((a, ())) => {
-            let start = input.len() - input_no_ws.len();
-            let len = input_no_ws.len() - a.len();
-            let end = start + len;
+    match literal_nocapture(input) {
+        Ok((rest, ())) => {
+            let len = input.len() - rest.len();
             Ok((
-                a,
-                Literal::new(input.rest[start..end].to_string(), DUMMY_SPAN),
+                rest,
+                Literal::new(input.rest[..len].to_string(), input.span_to(rest)),
             ))
         }
         Err(LexError) => Err(LexError),
@@ -991,14 +978,14 @@ fn op(input: Cursor) -> PResult<Punct> {
     match op_char(input) {
         Ok((rest, '\'')) => {
             symbol(rest)?;
-            Ok((rest, Punct::new('\'', Spacing::Joint, DUMMY_SPAN)))
+            Ok((rest, Punct::new('\'', Spacing::Joint, input.span_to(rest))))
         }
         Ok((rest, ch)) => {
             let kind = match op_char(rest) {
                 Ok(_) => Spacing::Joint,
                 Err(LexError) => Spacing::Alone,
             };
-            Ok((rest, Punct::new(ch, kind, DUMMY_SPAN)))
+            Ok((rest, Punct::new(ch, kind, input.span_to(rest))))
         }
         Err(LexError) => Err(LexError),
     }
@@ -1026,7 +1013,8 @@ fn op_char(input: Cursor) -> PResult<char> {
 }
 
 fn doc_comment(input: Cursor) -> PResult<Vec<TokenTreeT>> {
-    let (rest, ((comment, inner), span)) = spanned(input, doc_comment_contents)?;
+    let (rest, (comment, inner)) = doc_comment_contents(input)?;
+    let span = input.span_to(rest);
 
     let mut trees = Vec::new();
     trees.push(TokenTree::Punct(Punct::new('#', Spacing::Alone, span)));
