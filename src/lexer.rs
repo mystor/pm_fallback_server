@@ -6,7 +6,7 @@ use unicode_xid::UnicodeXID;
 use proc_macro::bridge::TokenTree;
 use proc_macro::{Delimiter, Spacing};
 
-use crate::{set_tt_span, Group, Ident, Literal, Punct, Span, TokenStream};
+use crate::{set_tt_span, Group, Ident, Literal, Punct, Span, TokenStream, DUMMY_SPAN};
 
 type TokenTreeT = TokenTree<Group, Punct, Ident, Literal>;
 
@@ -572,7 +572,7 @@ fn literal(input: Cursor) -> PResult<Literal> {
             let start = input.len() - input_no_ws.len();
             let len = input_no_ws.len() - a.len();
             let end = start + len;
-            Ok((a, Literal::_new(input.rest[start..end].to_string())))
+            Ok((a, Literal::new(input.rest[start..end].to_string(), DUMMY_SPAN)))
         }
         Err(LexError) => Err(LexError),
     }
@@ -1032,7 +1032,7 @@ fn doc_comment(input: Cursor) -> PResult<Vec<TokenTreeT>> {
     let mut stream = vec![
         TokenTree::Ident(Ident::new("doc", span)),
         TokenTree::Punct(Punct::new('=', Spacing::Alone)),
-        TokenTree::Literal(Literal::string(comment)),
+        TokenTree::Literal(Literal::string(comment, span)),
     ];
     for tt in stream.iter_mut() {
         set_tt_span(tt, span);

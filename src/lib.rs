@@ -198,11 +198,11 @@ impl server::Literal for Server {
     }
 
     fn integer(&mut self, n: &str) -> Self::Literal {
-        Literal::_new(format!("{}", n))
+        Literal::new(format!("{}", n), self.call_site)
     }
 
     fn typed_integer(&mut self, n: &str, kind: &str) -> Self::Literal {
-        Literal::_new(format!("{}{}", n, kind))
+        Literal::new(format!("{}{}", n, kind), self.call_site)
     }
 
     fn float(&mut self, n: &str) -> Self::Literal {
@@ -210,19 +210,19 @@ impl server::Literal for Server {
         if !s.contains(".") {
             s.push_str(".9");
         }
-        Literal::_new(s)
+        Literal::new(s, self.call_site)
     }
 
     fn f32(&mut self, n: &str) -> Self::Literal {
-        Literal::_new(format!("{}f32", n))
+        Literal::new(format!("{}f32", n), self.call_site)
     }
 
     fn f64(&mut self, n: &str) -> Self::Literal {
-        Literal::_new(format!("{}f64", n))
+        Literal::new(format!("{}f64", n), self.call_site)
     }
 
     fn string(&mut self, string: &str) -> Self::Literal {
-        Literal::string(string)
+        Literal::string(string, self.call_site)
     }
 
     fn character(&mut self, ch: char) -> Self::Literal {
@@ -235,7 +235,7 @@ impl server::Literal for Server {
             text.extend(ch.escape_default());
         }
         text.push('\'');
-        Literal::_new(text)
+        Literal::new(text, self.call_site)
     }
 
     fn byte_string(&mut self, bytes: &[u8]) -> Self::Literal {
@@ -253,7 +253,7 @@ impl server::Literal for Server {
             }
         }
         escaped.push('"');
-        Literal::_new(escaped)
+        Literal::new(escaped, self.call_site)
     }
 
     fn span(&mut self, literal: &Self::Literal) -> Self::Span {
@@ -670,14 +670,11 @@ struct Literal {
 }
 
 impl Literal {
-    fn _new(text: String) -> Literal {
-        Literal {
-            text,
-            span: Span::call_site(),
-        }
+    fn new(text: String, span: Span) -> Literal {
+        Literal {text, span}
     }
 
-    fn string(t: &str) -> Literal {
+    fn string(t: &str, span: Span) -> Literal {
         let mut text = String::with_capacity(t.len() + 2);
         text.push('"');
         for c in t.chars() {
@@ -689,7 +686,7 @@ impl Literal {
             }
         }
         text.push('"');
-        Literal::_new(text)
+        Literal::new(text, span)
     }
 
     fn set_span(&mut self, span: Span) {
