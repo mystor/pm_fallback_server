@@ -12,39 +12,47 @@ use std::fmt;
 use std::ops::Bound;
 use std::rc::Rc;
 use std::vec;
+use std::cell::Cell;
+use std::panic;
 
 use proc_macro::bridge::{client, server, TokenTree};
 use proc_macro::{Delimiter, Level, LineColumn, Spacing};
 
 mod lexer;
 
+// Hacky thread local and client set-up to work around the limited internal API
+// used by proc_macro.
+thread_local! {
+    static COMMAND: Cell<Option<Box<dyn FnOnce()>>> = Cell::new(None);
+}
+
 fn my_client_impl(stream: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    // Call the stashed closure
+    let cmd = COMMAND.with(|cmd| cmd.replace(None));
+    cmd.unwrap()();
     stream
 }
 const CLIENT: client::Client<fn(proc_macro::TokenStream) -> proc_macro::TokenStream> =
     client::Client::expand1(my_client_impl);
 
-pub fn run_server() -> Result<(), ()> {
-    let server = Server {
-        source_map: SourceMap {
-            files: vec![Rc::new(FileInfo {
-                name: "<unspecified>".to_owned(),
-                span: DUMMY_SPAN,
-                lines: vec![0],
-            })],
-        },
-        def_site: DUMMY_SPAN,
-        call_site: DUMMY_SPAN,
-        // mixed_site: DUMMY_SPAN,
-    };
+/// Run the command with a proc_macro server.
+pub fn run_server<F: FnOnce() + 'static>(f: F) {
+    let server = Server::new();
 
-    match CLIENT.run(&server::SameThread, server, TokenStream::new()) {
-        Ok(_) => Ok(()),
-        Err(_) => Err(()),
+    let cmd = COMMAND.with(|cmd| cmd.replace(Some(Box::new(f))));
+    assert!(cmd.is_none(), "Found pending command");
+
+    let result = CLIENT.run(&server::SameThread, server, TokenStream::new());
+
+    let cmd = COMMAND.with(|cmd| cmd.replace(None));
+    assert!(cmd.is_none(), "Command was not processed");
+
+    if let Err(err) = result {
+        panic::resume_unwind(err.into());
     }
 }
 
-// The canonical `Server` type used by this crate.
+// The internal `Server` type.
 struct Server {
     source_map: SourceMap,
     def_site: Span,
@@ -52,8 +60,21 @@ struct Server {
     // mixed_site: Span,
 }
 
-pub fn new_server() {
-    unimplemented!()
+impl Server {
+    fn new() -> Self {
+        Server {
+            source_map: SourceMap {
+                files: vec![Rc::new(FileInfo {
+                    name: "<unspecified>".to_owned(),
+                    span: DUMMY_SPAN,
+                    lines: vec![0],
+                })],
+            },
+            def_site: DUMMY_SPAN,
+            call_site: DUMMY_SPAN,
+            // mixed_site: DUMMY_SPAN,
+        }
+    }
 }
 
 impl server::Types for Server {
@@ -302,22 +323,29 @@ impl server::MultiSpan for Server {
 }
 
 impl server::Diagnostic for Server {
-    fn new(&mut self, _level: Level, _msg: &str, _spans: Self::MultiSpan) -> Self::Diagnostic {
-        unimplemented!()
+    fn new(&mut self, level: Level, msg: &str, _spans: Self::MultiSpan) -> Self::Diagnostic {
+        Diagnostic { level, msg: msg.to_string(), children: Vec::new() }
     }
 
     fn sub(
         &mut self,
-        _diag: &mut Self::Diagnostic,
-        _level: Level,
-        _msg: &str,
+        diag: &mut Self::Diagnostic,
+        level: Level,
+        msg: &str,
         _spans: Self::MultiSpan,
     ) {
-        unimplemented!()
+        diag.children.push(Diagnostic {
+            level,
+            msg: msg.to_string(),
+            children: Vec::new(),
+        });
     }
 
-    fn emit(&mut self, _diag: Self::Diagnostic) {
-        unimplemented!()
+    fn emit(&mut self, diag: Self::Diagnostic) {
+        eprintln!("{:?}: {}", diag.level, diag.msg);
+        for child in diag.children {
+            self.emit(child)
+        }
     }
 }
 
@@ -325,34 +353,43 @@ impl server::Span for Server {
     fn debug(&mut self, span: Self::Span) -> String {
         format!("bytes({}..{})", span.lo, span.hi)
     }
+
     fn def_site(&mut self) -> Self::Span {
         self.def_site
     }
+
     fn call_site(&mut self) -> Self::Span {
         self.call_site
     }
+
     /*
     fn mixed_site(&mut self) -> Self::Span {
         self.mixed_site
     }
      */
+
     fn source_file(&mut self, span: Self::Span) -> Self::SourceFile {
         self.source_map.fileinfo(span).clone()
     }
+
     fn parent(&mut self, _span: Self::Span) -> Option<Self::Span> {
         None
     }
+
     fn source(&mut self, span: Self::Span) -> Self::Span {
         span
     }
+
     fn start(&mut self, span: Self::Span) -> LineColumn {
         let fi = self.source_map.fileinfo(span);
         fi.offset_line_column(span.lo as usize)
     }
+
     fn end(&mut self, span: Self::Span) -> LineColumn {
         let fi = self.source_map.fileinfo(span);
         fi.offset_line_column(span.hi as usize)
     }
+
     fn join(&mut self, first: Self::Span, second: Self::Span) -> Option<Self::Span> {
         // If `other` is not within the same `FileInfo` as us, return None.
         if !self.source_map.fileinfo(first).span_within(second) {
@@ -363,12 +400,13 @@ impl server::Span for Server {
             hi: cmp::max(first.hi, second.hi),
         })
     }
+
     fn resolved_at(&mut self, span: Self::Span, _at: Self::Span) -> Self::Span {
         span
     }
+
     fn source_text(&mut self, _span: Self::Span) -> Option<String> {
-        // NOTE: Consider keeping track of source text we've been asked to parse?
-        None
+        None  // NOTE: Consider keeping track of source text we've been asked to parse?
     }
 }
 
@@ -695,4 +733,8 @@ impl fmt::Display for Literal {
     }
 }
 
-struct Diagnostic {}
+struct Diagnostic {
+    level: Level,
+    msg: String,
+    children: Vec<Diagnostic>,
+}
