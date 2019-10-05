@@ -988,14 +988,14 @@ fn op(input: Cursor) -> PResult<Punct> {
     match op_char(input) {
         Ok((rest, '\'')) => {
             symbol(rest)?;
-            Ok((rest, Punct::new('\'', Spacing::Joint)))
+            Ok((rest, Punct::new('\'', Spacing::Joint, DUMMY_SPAN)))
         }
         Ok((rest, ch)) => {
             let kind = match op_char(rest) {
                 Ok(_) => Spacing::Joint,
                 Err(LexError) => Spacing::Alone,
             };
-            Ok((rest, Punct::new(ch, kind)))
+            Ok((rest, Punct::new(ch, kind, DUMMY_SPAN)))
         }
         Err(LexError) => Err(LexError),
     }
@@ -1025,13 +1025,13 @@ fn op_char(input: Cursor) -> PResult<char> {
 fn doc_comment(input: Cursor) -> PResult<Vec<TokenTreeT>> {
     let mut trees = Vec::new();
     let (rest, ((comment, inner), span)) = spanned(input, doc_comment_contents)?;
-    trees.push(TokenTree::Punct(Punct::new('#', Spacing::Alone)));
+    trees.push(TokenTree::Punct(Punct::new('#', Spacing::Alone, span)));
     if inner {
-        trees.push(TokenTree::Punct(Punct::new('!', Spacing::Alone)));
+        trees.push(TokenTree::Punct(Punct::new('!', Spacing::Alone, span)));
     }
     let mut stream = vec![
         TokenTree::Ident(Ident::new("doc", false, span)),
-        TokenTree::Punct(Punct::new('=', Spacing::Alone)),
+        TokenTree::Punct(Punct::new('=', Spacing::Alone, span)),
         TokenTree::Literal(Literal::string(comment, span)),
     ];
     for tt in stream.iter_mut() {

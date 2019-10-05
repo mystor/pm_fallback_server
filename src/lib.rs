@@ -158,7 +158,7 @@ impl server::Group for Server {
 
 impl server::Punct for Server {
     fn new(&mut self, ch: char, spacing: Spacing) -> Self::Punct {
-        Punct::new(ch, spacing)
+        Punct::new(ch, spacing, self.call_site)
     }
 
     fn as_char(&mut self, punct: Self::Punct) -> char {
@@ -586,11 +586,11 @@ impl Punct {
     ///
     /// The returned `Punct` will have the default span of `Span::call_site()`
     /// which can be further configured with the `set_span` method below.
-    fn new(op: char, spacing: Spacing) -> Punct {
+    fn new(op: char, spacing: Spacing, span: Span) -> Punct {
         Punct {
             op,
             joint: spacing == Spacing::Joint,
-            span: Span::call_site(),
+            span,
         }
     }
 
