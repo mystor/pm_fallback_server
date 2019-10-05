@@ -180,7 +180,7 @@ impl server::Punct for Server {
 
 impl server::Ident for Server {
     fn new(&mut self, string: &str, span: Self::Span, is_raw: bool) -> Self::Ident {
-        Ident::_new(string, is_raw, span)
+        Ident::new(string, is_raw, span)
     }
 
     fn span(&mut self, ident: Self::Ident) -> Self::Span {
@@ -630,7 +630,7 @@ struct Ident {
 }
 
 impl Ident {
-    fn _new(string: &str, raw: bool, span: Span) -> Ident {
+    fn new(string: &str, raw: bool, span: Span) -> Ident {
         lexer::validate_ident(string);
 
         Ident {
@@ -639,14 +639,6 @@ impl Ident {
             span,
             raw,
         }
-    }
-
-    fn new(string: &str, span: Span) -> Ident {
-        Ident::_new(string, false, span)
-    }
-
-    fn new_raw(string: &str, span: Span) -> Ident {
-        Ident::_new(string, true, span)
     }
 
     fn set_span(&mut self, span: Span) {

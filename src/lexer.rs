@@ -533,7 +533,7 @@ fn symbol(input: Cursor) -> PResult<TokenTreeT> {
     let (rest, sym) = symbol_not_raw(rest)?;
 
     if !raw {
-        let ident = Ident::new(sym, Span::call_site());
+        let ident = Ident::new(sym, false, Span::call_site());
         return Ok((rest, TokenTree::Ident(ident)));
     }
 
@@ -541,7 +541,7 @@ fn symbol(input: Cursor) -> PResult<TokenTreeT> {
         return Err(LexError);
     }
 
-    let ident = Ident::new_raw(sym, Span::call_site());
+    let ident = Ident::new(sym, true, Span::call_site());
     Ok((rest, TokenTree::Ident(ident)))
 }
 
@@ -1030,7 +1030,7 @@ fn doc_comment(input: Cursor) -> PResult<Vec<TokenTreeT>> {
         trees.push(TokenTree::Punct(Punct::new('!', Spacing::Alone)));
     }
     let mut stream = vec![
-        TokenTree::Ident(Ident::new("doc", span)),
+        TokenTree::Ident(Ident::new("doc", false, span)),
         TokenTree::Punct(Punct::new('=', Spacing::Alone)),
         TokenTree::Literal(Literal::string(comment, span)),
     ];
