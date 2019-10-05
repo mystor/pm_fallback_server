@@ -3,6 +3,7 @@
 
 #![feature(proc_macro_internals)]
 #![feature(proc_macro_span)]
+#![feature(proc_macro_diagnostic)]
 
 extern crate proc_macro;
 
@@ -10,17 +11,364 @@ use std::cell::RefCell;
 use std::cmp;
 use std::fmt;
 use std::iter;
-use std::ops::RangeBounds;
+use std::ops::{RangeBounds, Bound};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::rc::Rc;
 use std::vec;
 
-use proc_macro::{Delimiter, Spacing, LineColumn};
-use proc_macro::bridge::{server, TokenTree};
+use proc_macro::{Delimiter, Spacing, LineColumn, Level};
+use proc_macro::bridge::{server, client, TokenTree};
 
 mod lexer;
+
+fn my_client_impl(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    proc_macro::TokenStream::new()
+}
+const CLIENT: client::Client<fn(proc_macro::TokenStream) -> proc_macro::TokenStream> = client::Client::expand1(my_client_impl);
+
+pub fn run_server<F: FnOnce()>() -> Result<(), ()> {
+    let dummy_span = Span { lo: 0, hi: 0 };
+    let server = Server {
+        source_map: SourceMap {
+            files: vec![Rc::new(FileInfo {
+                name: "<unspecified>".to_owned(),
+                span: dummy_span,
+                lines: vec![0],
+            })],
+        },
+        def_site: dummy_span,
+        call_site: dummy_span,
+        mixed_site: dummy_span,
+    };
+
+    match CLIENT.run(&server::SameThread, server, TokenStream::new()) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(()),
+    }
+}
+
+// The canonical `Server` type used by this crate.
+struct Server {
+    source_map: SourceMap,
+    def_site: Span,
+    call_site: Span,
+    mixed_site: Span,
+}
+
+pub fn new_server() {
+    unimplemented!()
+}
+
+impl server::Types for Server {
+    type TokenStream = TokenStream;
+    type TokenStreamBuilder = TokenStreamBuilder;
+    type TokenStreamIter = TokenStreamIter;
+    type Group = Group;
+    type Punct = Punct;
+    type Ident = Ident;
+    type Literal = Literal;
+    type SourceFile = Rc<FileInfo>;
+    type MultiSpan = Vec<Span>;
+    type Diagnostic = Diagnostic;
+    type Span = Span;
+}
+
+impl server::TokenStream for Server {
+    fn new(&mut self) -> Self::TokenStream {
+        TokenStream::new()
+    }
+
+    fn is_empty(&mut self, stream: &Self::TokenStream) -> bool {
+        stream.is_empty()
+    }
+
+    fn from_str(&mut self, src: &str) -> Self::TokenStream {
+        let name = format!("<parsed string {}>", self.source_map.files.len());
+        let span = self.source_map.add_file(&name, src);
+        lexer::lex_stream(src, span.lo)
+            .expect("error while lexing")
+    }
+
+    fn to_string(&mut self, stream: &Self::TokenStream) -> String {
+        stream.to_string()
+    }
+
+    fn from_token_tree(
+        &mut self,
+        tree: TokenTree<Self::Group, Self::Punct, Self::Ident, Self::Literal>,
+    ) -> Self::TokenStream {
+        TokenStream { inner: vec![tree] }
+    }
+
+    fn into_iter(&mut self, stream: Self::TokenStream) -> Self::TokenStreamIter {
+        stream.inner.into_iter()
+    }
+}
+
+impl server::TokenStreamBuilder for Server {
+    fn new(&mut self) -> Self::TokenStreamBuilder {
+        TokenStreamBuilder { inner: Vec::new() }
+    }
+
+    fn push(&mut self, builder: &mut Self::TokenStreamBuilder, stream: Self::TokenStream) {
+        builder.inner.extend(stream.inner)
+    }
+
+    fn build(&mut self, builder: Self::TokenStreamBuilder) -> Self::TokenStream {
+        TokenStream { inner: builder.inner }
+    }
+}
+
+impl server::TokenStreamIter for Server {
+    fn next(&mut self, iter: &mut Self::TokenStreamIter) -> Option<TokenTree<Self::Group, Self::Punct, Self::Ident, Self::Literal>> {
+        iter.next()
+    }
+}
+
+impl server::Group for Server {
+    fn new(&mut self, delimiter: Delimiter, stream: Self::TokenStream) -> Self::Group {
+        Group::new(delimiter, stream)
+    }
+
+    fn delimiter(&mut self, group: &Self::Group) -> Delimiter {
+        group.delimiter
+    }
+
+    fn stream(&mut self, group: &Self::Group) -> Self::TokenStream {
+        group.stream.clone()
+    }
+
+    fn span(&mut self, group: &Self::Group) -> Self::Span {
+        group.span
+    }
+
+    fn span_open(&mut self, group: &Self::Group) -> Self::Span {
+        group.span // FIXME: Generate correct span
+    }
+
+    fn span_close(&mut self, group: &Self::Group) -> Self::Span {
+        group.span // FIXME: Generate correct span
+    }
+
+    fn set_span(&mut self, group: &mut Self::Group, span: Self::Span) {
+        group.set_span(span);
+    }
+}
+
+impl server::Punct for Server {
+    fn new(&mut self, ch: char, spacing: Spacing) -> Self::Punct {
+        Punct::new(ch, spacing)
+    }
+
+    fn as_char(&mut self, punct: Self::Punct) -> char {
+        punct.op
+    }
+
+    fn spacing(&mut self, punct: Self::Punct) -> Spacing {
+        punct.spacing()
+    }
+
+    fn span(&mut self, punct: Self::Punct) -> Self::Span {
+        punct.span
+    }
+
+    fn with_span(&mut self, punct: Self::Punct, span: Self::Span) -> Self::Punct {
+        Punct { span, ..punct }
+    }
+}
+
+impl server::Ident for Server {
+    fn new(&mut self, string: &str, span: Self::Span, is_raw: bool) -> Self::Ident {
+        Ident::_new(string, is_raw, span)
+    }
+
+    fn span(&mut self, ident: Self::Ident) -> Self::Span {
+        ident.span
+    }
+
+    fn with_span(&mut self, ident: Self::Ident, span: Self::Span) -> Self::Ident {
+        Ident { span, ..ident }
+    }
+}
+
+impl server::Literal for Server {
+    fn debug(&mut self, literal: &Self::Literal) -> String {
+        format!("{:?}", literal)
+    }
+
+    fn integer(&mut self, n: &str) -> Self::Literal {
+        Literal::_new(format!("{}", n))
+    }
+
+    fn typed_integer(&mut self, n: &str, kind: &str) -> Self::Literal {
+        Literal::_new(format!("{}{}", n, kind))
+    }
+
+    fn float(&mut self, n: &str) -> Self::Literal {
+        let mut s = n.to_string();
+        if !s.contains(".") {
+            s.push_str(".9");
+        }
+        Literal::_new(s)
+    }
+
+    fn f32(&mut self, n: &str) -> Self::Literal {
+        Literal::_new(format!("{}f32", n))
+    }
+
+    fn f64(&mut self, n: &str) -> Self::Literal {
+        Literal::_new(format!("{}f64", n))
+    }
+
+    fn string(&mut self, string: &str) -> Self::Literal {
+        let mut text = String::with_capacity(string.len() + 2);
+        text.push('"');
+        for c in string.chars() {
+            if c == '\'' {
+                // escape_default turns this into "\'" which is unnecessary.
+                text.push(c);
+            } else {
+                text.extend(c.escape_default());
+            }
+        }
+        text.push('"');
+        Literal::_new(text)
+    }
+
+    fn character(&mut self, ch: char) -> Self::Literal {
+        let mut text = String::new();
+        text.push('\'');
+        if ch == '"' {
+            // escape_default turns this into '\"' which is unnecessary.
+            text.push(ch);
+        } else {
+            text.extend(ch.escape_default());
+        }
+        text.push('\'');
+        Literal::_new(text)
+    }
+
+    fn byte_string(&mut self, bytes: &[u8]) -> Self::Literal {
+        let mut escaped = "b\"".to_string();
+        for b in bytes {
+            match *b {
+                b'\0' => escaped.push_str(r"\0"),
+                b'\t' => escaped.push_str(r"\t"),
+                b'\n' => escaped.push_str(r"\n"),
+                b'\r' => escaped.push_str(r"\r"),
+                b'"' => escaped.push_str("\\\""),
+                b'\\' => escaped.push_str("\\\\"),
+                b'\x20'..=b'\x7E' => escaped.push(*b as char),
+                _ => escaped.push_str(&format!("\\x{:02X}", b)),
+            }
+        }
+        escaped.push('"');
+        Literal::_new(escaped)
+    }
+
+    fn span(&mut self, literal: &Self::Literal) -> Self::Span {
+        literal.span
+    }
+
+    fn set_span(&mut self, literal: &mut Self::Literal, span: Self::Span) {
+        literal.set_span(span)
+    }
+
+    fn subspan(&mut self, _literal: &Self::Literal, _start: Bound<usize>, _end: Bound<usize>) -> Option<Self::Span> {
+        None // FIXME: Support this
+    }
+}
+
+impl server::SourceFile for Server {
+    fn eq(&mut self, file1: &Self::SourceFile, file2: &Self::SourceFile) -> bool {
+        Rc::ptr_eq(file1, file2)
+    }
+
+    fn path(&mut self, file: &Self::SourceFile) -> String {
+        file.name.clone()
+    }
+
+    fn is_real(&mut self, _file: &Self::SourceFile) -> bool {
+        false
+    }
+}
+
+impl server::MultiSpan for Server {
+    fn new(&mut self) -> Self::MultiSpan {
+        vec![]
+    }
+
+    fn push(&mut self, spans: &mut Self::MultiSpan, span: Self::Span) {
+        spans.push(span)
+    }
+}
+
+impl server::Diagnostic for Server {
+    fn new(&mut self, _level: Level, _msg: &str, _spans: Self::MultiSpan) -> Self::Diagnostic {
+        unimplemented!()
+    }
+
+    fn sub(&mut self, _diag: &mut Self::Diagnostic, _level: Level, _msg: &str, _spans: Self::MultiSpan) {
+        unimplemented!()
+    }
+
+    fn emit(&mut self, _diag: Self::Diagnostic) {
+        unimplemented!()
+    }
+}
+
+impl server::Span for Server {
+    fn debug(&mut self, span: Self::Span) -> String {
+        format!("bytes({}..{})", span.lo, span.hi)
+    }
+    fn def_site(&mut self) -> Self::Span {
+        self.def_site
+    }
+    fn call_site(&mut self) -> Self::Span {
+        self.call_site
+    }
+    /*
+    fn mixed_site(&mut self) -> Self::Span {
+        self.mixed_site
+    }
+     */
+    fn source_file(&mut self, span: Self::Span) -> Self::SourceFile {
+        self.source_map.fileinfo(span).clone()
+    }
+    fn parent(&mut self, span: Self::Span) -> Option<Self::Span> {
+        None
+    }
+    fn source(&mut self, span: Self::Span) -> Self::Span {
+        span
+    }
+    fn start(&mut self, span: Self::Span) -> LineColumn {
+        let fi = self.source_map.fileinfo(span);
+        fi.offset_line_column(span.lo as usize)
+    }
+    fn end(&mut self, span: Self::Span) -> LineColumn {
+        let fi = self.source_map.fileinfo(span);
+        fi.offset_line_column(span.hi as usize)
+    }
+    fn join(&mut self, first: Self::Span, second: Self::Span) -> Option<Self::Span> {
+        // If `other` is not within the same `FileInfo` as us, return None.
+        if !self.source_map.fileinfo(first).span_within(second) {
+            return None;
+        }
+        Some(Span {
+            lo: cmp::min(first.lo, second.lo),
+            hi: cmp::max(first.hi, second.hi),
+        })
+    }
+    fn resolved_at(&mut self, span: Self::Span, _at: Self::Span) -> Self::Span {
+        span
+    }
+    fn source_text(&mut self, _span: Self::Span) -> Option<String> {
+        // NOTE: Consider keeping track of source text we've been asked to parse?
+        None
+    }
+}
 
 type TokenTreeT = TokenTree<Group, Punct, Ident, Literal>;
 
@@ -33,41 +381,22 @@ fn set_tt_span(tt: &mut TokenTreeT, span: Span) {
     }
 }
 
-pub struct TokenStreamBuilder {
+struct TokenStreamBuilder {
     inner: Vec<TokenTreeT>,
 }
 
 #[derive(Clone)]
-pub struct TokenStream {
+struct TokenStream {
     inner: Vec<TokenTreeT>,
 }
 
 impl TokenStream {
-    pub fn new() -> TokenStream {
+    fn new() -> TokenStream {
         TokenStream { inner: Vec::new() }
     }
 
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.inner.len() == 0
-    }
-}
-
-fn add_to_source_map(src: &str) -> u32 {
-    // Create a dummy file & add it to the source map
-    SOURCE_MAP.with(|cm| {
-        let mut cm = cm.borrow_mut();
-        let name = format!("<parsed string {}>", cm.files.len());
-        let span = cm.add_file(&name, src);
-        span.lo
-    })
-}
-
-impl FromStr for TokenStream {
-    type Err = lexer::LexError;
-
-    fn from_str(src: &str) -> Result<TokenStream, lexer::LexError> {
-        let start_off = add_to_source_map(src);
-        lexer::lex_stream(src, start_off)
     }
 }
 
@@ -87,10 +416,10 @@ impl fmt::Display for TokenStream {
                         Delimiter::Bracket => ("[", "]"),
                         Delimiter::None => ("", ""),
                     };
-                    if tt.stream().into_iter().next().is_none() {
+                    if tt.stream.is_empty() {
                         write!(f, "{} {}", start, end)?
                     } else {
-                        write!(f, "{} {} {}", start, tt.stream(), end)?
+                        write!(f, "{} {} {}", start, tt.stream, end)?
                     }
                 }
                 TokenTree::Ident(ref tt) => write!(f, "{}", tt)?,
@@ -109,72 +438,20 @@ impl fmt::Display for TokenStream {
     }
 }
 
-impl From<TokenTreeT> for TokenStream {
-    fn from(tree: TokenTreeT) -> TokenStream {
-        TokenStream { inner: vec![tree] }
-    }
-}
-
-impl iter::FromIterator<TokenTreeT> for TokenStream {
-    fn from_iter<I: IntoIterator<Item = TokenTreeT>>(streams: I) -> Self {
-        let mut v = Vec::new();
-
-        for token in streams.into_iter() {
-            v.push(token);
-        }
-
-        TokenStream { inner: v }
-    }
-}
-
-impl iter::FromIterator<TokenStream> for TokenStream {
-    fn from_iter<I: IntoIterator<Item = TokenStream>>(streams: I) -> Self {
-        let mut v = Vec::new();
-
-        for stream in streams.into_iter() {
-            v.extend(stream.inner);
-        }
-
-        TokenStream { inner: v }
-    }
-}
-
-impl Extend<TokenTreeT> for TokenStream {
-    fn extend<I: IntoIterator<Item = TokenTreeT>>(&mut self, streams: I) {
-        self.inner.extend(streams);
-    }
-}
-
-impl Extend<TokenStream> for TokenStream {
-    fn extend<I: IntoIterator<Item = TokenStream>>(&mut self, streams: I) {
-        self.inner
-            .extend(streams.into_iter().flat_map(|stream| stream));
-    }
-}
-
-pub type TokenStreamIter = vec::IntoIter<TokenTreeT>;
-
-impl IntoIterator for TokenStream {
-    type Item = TokenTreeT;
-    type IntoIter = TokenStreamIter;
-
-    fn into_iter(self) -> TokenStreamIter {
-        self.inner.into_iter()
-    }
-}
+type TokenStreamIter = vec::IntoIter<TokenTreeT>;
 
 #[derive(Clone, PartialEq, Eq)]
-pub struct SourceFile {
+struct SourceFile {
     path: PathBuf,
 }
 
 impl SourceFile {
     /// Get the path to this source file as a string.
-    pub fn path(&self) -> PathBuf {
+    fn path(&self) -> PathBuf {
         self.path.clone()
     }
 
-    pub fn is_real(&self) -> bool {
+    fn is_real(&self) -> bool {
         // XXX(nika): Support real files in the future?
         false
     }
@@ -187,22 +464,6 @@ impl fmt::Debug for SourceFile {
             .field("is_real", &self.is_real())
             .finish()
     }
-}
-
-thread_local! {
-    static SOURCE_MAP: RefCell<SourceMap> = RefCell::new(SourceMap {
-        // NOTE: We start with a single dummy file which all call_site() and
-        // def_site() spans reference.
-        files: vec![{
-            {
-                FileInfo {
-                    name: "<unspecified>".to_owned(),
-                    span: Span { lo: 0, hi: 0 },
-                    lines: vec![0],
-                }
-            }
-        }],
-    });
 }
 
 struct FileInfo {
@@ -247,7 +508,7 @@ fn lines_offsets(s: &str) -> Vec<usize> {
 }
 
 struct SourceMap {
-    files: Vec<FileInfo>,
+    files: Vec<Rc<FileInfo>>,
 }
 
 impl SourceMap {
@@ -268,16 +529,16 @@ impl SourceMap {
             hi: lo + (src.len() as u32),
         };
 
-        self.files.push(FileInfo {
+        self.files.push(Rc::new(FileInfo {
             name: name.to_owned(),
             span,
             lines,
-        });
+        }));
 
         span
     }
 
-    fn fileinfo(&self, span: Span) -> &FileInfo {
+    fn fileinfo(&self, span: Span) -> &Rc<FileInfo> {
         for file in &self.files {
             if file.span_within(span) {
                 return file;
@@ -288,69 +549,14 @@ impl SourceMap {
 }
 
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
-pub struct Span {
+struct Span {
     lo: u32,
     hi: u32,
 }
 
 impl Span {
-    pub fn call_site() -> Span {
+    fn call_site() -> Span {
         Span { lo: 0, hi: 0 }
-    }
-
-    pub fn def_site() -> Span {
-        Span::call_site()
-    }
-
-    pub fn resolved_at(&self, _other: Span) -> Span {
-        // Stable spans consist only of line/column information, so
-        // `resolved_at` and `located_at` only select which span the
-        // caller wants line/column information from.
-        *self
-    }
-
-    pub fn located_at(&self, other: Span) -> Span {
-        other
-    }
-
-    pub fn source_file(&self) -> SourceFile {
-        SOURCE_MAP.with(|cm| {
-            let cm = cm.borrow();
-            let fi = cm.fileinfo(*self);
-            SourceFile {
-                path: Path::new(&fi.name).to_owned(),
-            }
-        })
-    }
-
-    pub fn start(&self) -> LineColumn {
-        SOURCE_MAP.with(|cm| {
-            let cm = cm.borrow();
-            let fi = cm.fileinfo(*self);
-            fi.offset_line_column(self.lo as usize)
-        })
-    }
-
-    pub fn end(&self) -> LineColumn {
-        SOURCE_MAP.with(|cm| {
-            let cm = cm.borrow();
-            let fi = cm.fileinfo(*self);
-            fi.offset_line_column(self.hi as usize)
-        })
-    }
-
-    pub fn join(&self, other: Span) -> Option<Span> {
-        SOURCE_MAP.with(|cm| {
-            let cm = cm.borrow();
-            // If `other` is not within the same FileInfo as us, return None.
-            if !cm.fileinfo(*self).span_within(other) {
-                return None;
-            }
-            Some(Span {
-                lo: cmp::min(self.lo, other.lo),
-                hi: cmp::max(self.hi, other.hi),
-            })
-        })
     }
 }
 
@@ -361,14 +567,14 @@ impl fmt::Debug for Span {
 }
 
 #[derive(Clone)]
-pub struct Group {
+struct Group {
     delimiter: Delimiter,
     stream: TokenStream,
     span: Span,
 }
 
 impl Group {
-    pub fn new(delimiter: Delimiter, stream: TokenStream) -> Group {
+    fn new(delimiter: Delimiter, stream: TokenStream) -> Group {
         Group {
             delimiter,
             stream,
@@ -376,27 +582,27 @@ impl Group {
         }
     }
 
-    pub fn delimiter(&self) -> Delimiter {
+    fn delimiter(&self) -> Delimiter {
         self.delimiter
     }
 
-    pub fn stream(&self) -> TokenStream {
+    fn stream(&self) -> TokenStream {
         self.stream.clone()
     }
 
-    pub fn span(&self) -> Span {
+    fn span(&self) -> Span {
         self.span
     }
 
-    pub fn span_open(&self) -> Span {
+    fn span_open(&self) -> Span {
         self.span
     }
 
-    pub fn span_close(&self) -> Span {
+    fn span_close(&self) -> Span {
         self.span
     }
 
-    pub fn set_span(&mut self, span: Span) {
+    fn set_span(&mut self, span: Span) {
         self.span = span;
     }
 }
@@ -423,7 +629,7 @@ impl fmt::Display for Group {
 /// Multicharacter operators like `+=` are represented as two instances of
 /// `Punct` with different forms of `Spacing` returned.
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct Punct {
+struct Punct {
     op: char,
     joint: bool, // Spacing is not `Hash`
     span: Span,
@@ -437,7 +643,7 @@ impl Punct {
     ///
     /// The returned `Punct` will have the default span of `Span::call_site()`
     /// which can be further configured with the `set_span` method below.
-    pub fn new(op: char, spacing: Spacing) -> Punct {
+    fn new(op: char, spacing: Spacing) -> Punct {
         Punct {
             op,
             joint: spacing == Spacing::Joint,
@@ -446,7 +652,7 @@ impl Punct {
     }
 
     /// Returns the value of this punctuation character as `char`.
-    pub fn as_char(&self) -> char {
+    fn as_char(&self) -> char {
         self.op
     }
 
@@ -455,7 +661,7 @@ impl Punct {
     /// they can potentially be combined into a multicharacter operator
     /// (`Joint`), or it's followed by some other token or whitespace (`Alone`)
     /// so the operator has certainly ended.
-    pub fn spacing(&self) -> Spacing {
+    fn spacing(&self) -> Spacing {
         if self.joint {
             Spacing::Joint
         } else {
@@ -464,12 +670,12 @@ impl Punct {
     }
 
     /// Returns the span for this punctuation character.
-    pub fn span(&self) -> Span {
+    fn span(&self) -> Span {
         self.span
     }
 
     /// Configure the span for this punctuation character.
-    pub fn set_span(&mut self, span: Span) {
+    fn set_span(&mut self, span: Span) {
         self.span = span;
     }
 }
@@ -483,7 +689,7 @@ impl fmt::Display for Punct {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct Ident {
+struct Ident {
     // sym: String,
     sym: u32,
     span: Span,
@@ -502,19 +708,19 @@ impl Ident {
         }
     }
 
-    pub fn new(string: &str, span: Span) -> Ident {
+    fn new(string: &str, span: Span) -> Ident {
         Ident::_new(string, false, span)
     }
 
-    pub fn new_raw(string: &str, span: Span) -> Ident {
+    fn new_raw(string: &str, span: Span) -> Ident {
         Ident::_new(string, true, span)
     }
 
-    pub fn span(&self) -> Span {
+    fn span(&self) -> Span {
         self.span
     }
 
-    pub fn set_span(&mut self, span: Span) {
+    fn set_span(&mut self, span: Span) {
         self.span = span;
     }
 }
@@ -529,14 +735,14 @@ impl fmt::Display for Ident {
 }
 
 #[derive(Clone)]
-pub struct Literal {
+struct Literal {
     text: String,
     span: Span,
 }
 
 macro_rules! suffixed_numbers {
     ($($name:ident => $kind:ident,)*) => ($(
-        pub fn $name(n: $kind) -> Literal {
+        fn $name(n: $kind) -> Literal {
             Literal::_new(format!(concat!("{}", stringify!($kind)), n))
         }
     )*)
@@ -544,7 +750,7 @@ macro_rules! suffixed_numbers {
 
 macro_rules! unsuffixed_numbers {
     ($($name:ident => $kind:ident,)*) => ($(
-        pub fn $name(n: $kind) -> Literal {
+        fn $name(n: $kind) -> Literal {
             Literal::_new(n.to_string())
         }
     )*)
@@ -591,7 +797,7 @@ impl Literal {
         isize_unsuffixed => isize,
     }
 
-    pub fn f32_unsuffixed(f: f32) -> Literal {
+    fn f32_unsuffixed(f: f32) -> Literal {
         let mut s = f.to_string();
         if !s.contains(".") {
             s.push_str(".0");
@@ -599,7 +805,7 @@ impl Literal {
         Literal::_new(s)
     }
 
-    pub fn f64_unsuffixed(f: f64) -> Literal {
+    fn f64_unsuffixed(f: f64) -> Literal {
         let mut s = f.to_string();
         if !s.contains(".") {
             s.push_str(".0");
@@ -607,7 +813,7 @@ impl Literal {
         Literal::_new(s)
     }
 
-    pub fn string(t: &str) -> Literal {
+    fn string(t: &str) -> Literal {
         let mut text = String::with_capacity(t.len() + 2);
         text.push('"');
         for c in t.chars() {
@@ -622,7 +828,7 @@ impl Literal {
         Literal::_new(text)
     }
 
-    pub fn character(t: char) -> Literal {
+    fn character(t: char) -> Literal {
         let mut text = String::new();
         text.push('\'');
         if t == '"' {
@@ -635,7 +841,7 @@ impl Literal {
         Literal::_new(text)
     }
 
-    pub fn byte_string(bytes: &[u8]) -> Literal {
+    fn byte_string(bytes: &[u8]) -> Literal {
         let mut escaped = "b\"".to_string();
         for b in bytes {
             match *b {
@@ -653,15 +859,15 @@ impl Literal {
         Literal::_new(escaped)
     }
 
-    pub fn span(&self) -> Span {
+    fn span(&self) -> Span {
         self.span
     }
 
-    pub fn set_span(&mut self, span: Span) {
+    fn set_span(&mut self, span: Span) {
         self.span = span;
     }
 
-    pub fn subspan<R: RangeBounds<usize>>(&self, _range: R) -> Option<Span> {
+    fn subspan<R: RangeBounds<usize>>(&self, _range: R) -> Option<Span> {
         None
     }
 }
@@ -682,26 +888,4 @@ impl fmt::Debug for Literal {
 }
 
 struct Diagnostic {}
-
-// The fallback server
-struct Server {}
-
-impl server::Types for Server {
-    type TokenStream = TokenStream;
-    type TokenStreamBuilder = TokenStreamBuilder;
-    type TokenStreamIter = TokenStreamIter;
-    type Group = Group;
-    type Punct = Punct;
-    type Ident = Ident;
-    type Literal = Literal;
-    type SourceFile = Rc<SourceFile>;
-    type MultiSpan = Vec<Span>;
-    type Diagnostic = Diagnostic;
-    type Span = Span;
-}
-
-#[test]
-fn whee() {
-    
-}
 

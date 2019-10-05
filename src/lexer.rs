@@ -11,9 +11,9 @@ use crate::{TokenStream, Group, Punct, Ident, Literal, Span, set_tt_span};
 type TokenTreeT = TokenTree<Group, Punct, Ident, Literal>;
 
 #[derive(Debug)]
-pub struct LexError;
+pub(crate) struct LexError;
 
-pub fn validate_ident(string: &str) {
+pub(crate) fn validate_ident(string: &str) {
     let validate = string;
     if validate.is_empty() {
         panic!("Ident is not allowed to be empty; use Option<Ident>");
@@ -42,7 +42,7 @@ pub fn validate_ident(string: &str) {
     }
 }
 
-pub fn lex_stream(src: &str, off: u32) -> Result<TokenStream, LexError> {
+pub(crate) fn lex_stream(src: &str, off: u32) -> Result<TokenStream, LexError> {
     let cursor = Cursor { rest: src, off };
     match token_stream(cursor) {
         Ok((input, output)) => {
@@ -1038,7 +1038,7 @@ fn doc_comment(input: Cursor) -> PResult<Vec<TokenTreeT>> {
     for tt in stream.iter_mut() {
         set_tt_span(tt, span);
     }
-    let group = Group::new(Delimiter::Bracket, stream.into_iter().collect());
+    let group = Group::new(Delimiter::Bracket, TokenStream { inner: stream });
     trees.push(TokenTree::Group(group));
     for tt in trees.iter_mut() {
         set_tt_span(tt, span);
