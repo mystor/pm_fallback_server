@@ -3,10 +3,10 @@
 use std::str::{Bytes, CharIndices, Chars};
 use unicode_xid::UnicodeXID;
 
-use proc_macro::{Delimiter, Spacing};
 use proc_macro::bridge::TokenTree;
+use proc_macro::{Delimiter, Spacing};
 
-use crate::{TokenStream, Group, Punct, Ident, Literal, Span, set_tt_span};
+use crate::{set_tt_span, Group, Ident, Literal, Punct, Span, TokenStream};
 
 type TokenTreeT = TokenTree<Group, Punct, Ident, Literal>;
 
@@ -433,7 +433,6 @@ macro_rules! map {
         map!($i, call!($f), $g)
     };
 }
-
 
 fn token_stream(mut input: Cursor) -> PResult<TokenStream> {
     let mut trees = Vec::new();
@@ -1074,4 +1073,3 @@ named!(doc_comment_contents -> (&str, bool), alt!(
         ((s, false))
     )
 ));
-

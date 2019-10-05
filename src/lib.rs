@@ -7,40 +7,35 @@
 
 extern crate proc_macro;
 
-use std::cell::RefCell;
 use std::cmp;
 use std::fmt;
-use std::iter;
-use std::ops::{RangeBounds, Bound};
-use std::path::Path;
-use std::path::PathBuf;
-use std::str::FromStr;
+use std::ops::Bound;
 use std::rc::Rc;
 use std::vec;
 
-use proc_macro::{Delimiter, Spacing, LineColumn, Level};
-use proc_macro::bridge::{server, client, TokenTree};
+use proc_macro::bridge::{client, server, TokenTree};
+use proc_macro::{Delimiter, Level, LineColumn, Spacing};
 
 mod lexer;
 
-fn my_client_impl(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    proc_macro::TokenStream::new()
+fn my_client_impl(stream: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    stream
 }
-const CLIENT: client::Client<fn(proc_macro::TokenStream) -> proc_macro::TokenStream> = client::Client::expand1(my_client_impl);
+const CLIENT: client::Client<fn(proc_macro::TokenStream) -> proc_macro::TokenStream> =
+    client::Client::expand1(my_client_impl);
 
-pub fn run_server<F: FnOnce()>() -> Result<(), ()> {
-    let dummy_span = Span { lo: 0, hi: 0 };
+pub fn run_server() -> Result<(), ()> {
     let server = Server {
         source_map: SourceMap {
             files: vec![Rc::new(FileInfo {
                 name: "<unspecified>".to_owned(),
-                span: dummy_span,
+                span: DUMMY_SPAN,
                 lines: vec![0],
             })],
         },
-        def_site: dummy_span,
-        call_site: dummy_span,
-        mixed_site: dummy_span,
+        def_site: DUMMY_SPAN,
+        call_site: DUMMY_SPAN,
+        // mixed_site: DUMMY_SPAN,
     };
 
     match CLIENT.run(&server::SameThread, server, TokenStream::new()) {
@@ -54,7 +49,7 @@ struct Server {
     source_map: SourceMap,
     def_site: Span,
     call_site: Span,
-    mixed_site: Span,
+    // mixed_site: Span,
 }
 
 pub fn new_server() {
@@ -87,8 +82,7 @@ impl server::TokenStream for Server {
     fn from_str(&mut self, src: &str) -> Self::TokenStream {
         let name = format!("<parsed string {}>", self.source_map.files.len());
         let span = self.source_map.add_file(&name, src);
-        lexer::lex_stream(src, span.lo)
-            .expect("error while lexing")
+        lexer::lex_stream(src, span.lo).expect("error while lexing")
     }
 
     fn to_string(&mut self, stream: &Self::TokenStream) -> String {
@@ -117,12 +111,17 @@ impl server::TokenStreamBuilder for Server {
     }
 
     fn build(&mut self, builder: Self::TokenStreamBuilder) -> Self::TokenStream {
-        TokenStream { inner: builder.inner }
+        TokenStream {
+            inner: builder.inner,
+        }
     }
 }
 
 impl server::TokenStreamIter for Server {
-    fn next(&mut self, iter: &mut Self::TokenStreamIter) -> Option<TokenTree<Self::Group, Self::Punct, Self::Ident, Self::Literal>> {
+    fn next(
+        &mut self,
+        iter: &mut Self::TokenStreamIter,
+    ) -> Option<TokenTree<Self::Group, Self::Punct, Self::Ident, Self::Literal>> {
         iter.next()
     }
 }
@@ -195,7 +194,7 @@ impl server::Ident for Server {
 
 impl server::Literal for Server {
     fn debug(&mut self, literal: &Self::Literal) -> String {
-        format!("{:?}", literal)
+        format!("Literal {{ lit: {}, span: {:?} }}", literal.text, literal.span)
     }
 
     fn integer(&mut self, n: &str) -> Self::Literal {
@@ -223,18 +222,7 @@ impl server::Literal for Server {
     }
 
     fn string(&mut self, string: &str) -> Self::Literal {
-        let mut text = String::with_capacity(string.len() + 2);
-        text.push('"');
-        for c in string.chars() {
-            if c == '\'' {
-                // escape_default turns this into "\'" which is unnecessary.
-                text.push(c);
-            } else {
-                text.extend(c.escape_default());
-            }
-        }
-        text.push('"');
-        Literal::_new(text)
+        Literal::string(string)
     }
 
     fn character(&mut self, ch: char) -> Self::Literal {
@@ -276,7 +264,12 @@ impl server::Literal for Server {
         literal.set_span(span)
     }
 
-    fn subspan(&mut self, _literal: &Self::Literal, _start: Bound<usize>, _end: Bound<usize>) -> Option<Self::Span> {
+    fn subspan(
+        &mut self,
+        _literal: &Self::Literal,
+        _start: Bound<usize>,
+        _end: Bound<usize>,
+    ) -> Option<Self::Span> {
         None // FIXME: Support this
     }
 }
@@ -310,7 +303,13 @@ impl server::Diagnostic for Server {
         unimplemented!()
     }
 
-    fn sub(&mut self, _diag: &mut Self::Diagnostic, _level: Level, _msg: &str, _spans: Self::MultiSpan) {
+    fn sub(
+        &mut self,
+        _diag: &mut Self::Diagnostic,
+        _level: Level,
+        _msg: &str,
+        _spans: Self::MultiSpan,
+    ) {
         unimplemented!()
     }
 
@@ -337,7 +336,7 @@ impl server::Span for Server {
     fn source_file(&mut self, span: Self::Span) -> Self::SourceFile {
         self.source_map.fileinfo(span).clone()
     }
-    fn parent(&mut self, span: Self::Span) -> Option<Self::Span> {
+    fn parent(&mut self, _span: Self::Span) -> Option<Self::Span> {
         None
     }
     fn source(&mut self, span: Self::Span) -> Self::Span {
@@ -409,22 +408,10 @@ impl fmt::Display for TokenStream {
             }
             joint = false;
             match *tt {
-                TokenTree::Group(ref tt) => {
-                    let (start, end) = match tt.delimiter() {
-                        Delimiter::Parenthesis => ("(", ")"),
-                        Delimiter::Brace => ("{", "}"),
-                        Delimiter::Bracket => ("[", "]"),
-                        Delimiter::None => ("", ""),
-                    };
-                    if tt.stream.is_empty() {
-                        write!(f, "{} {}", start, end)?
-                    } else {
-                        write!(f, "{} {} {}", start, tt.stream, end)?
-                    }
-                }
+                TokenTree::Group(ref tt) => write!(f, "{}", tt)?,
                 TokenTree::Ident(ref tt) => write!(f, "{}", tt)?,
                 TokenTree::Punct(ref tt) => {
-                    write!(f, "{}", tt.as_char())?;
+                    write!(f, "{}", tt.op)?;
                     match tt.spacing() {
                         Spacing::Alone => {}
                         Spacing::Joint => joint = true,
@@ -439,32 +426,6 @@ impl fmt::Display for TokenStream {
 }
 
 type TokenStreamIter = vec::IntoIter<TokenTreeT>;
-
-#[derive(Clone, PartialEq, Eq)]
-struct SourceFile {
-    path: PathBuf,
-}
-
-impl SourceFile {
-    /// Get the path to this source file as a string.
-    fn path(&self) -> PathBuf {
-        self.path.clone()
-    }
-
-    fn is_real(&self) -> bool {
-        // XXX(nika): Support real files in the future?
-        false
-    }
-}
-
-impl fmt::Debug for SourceFile {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("SourceFile")
-            .field("path", &self.path())
-            .field("is_real", &self.is_real())
-            .finish()
-    }
-}
 
 struct FileInfo {
     name: String,
@@ -548,6 +509,8 @@ impl SourceMap {
     }
 }
 
+const DUMMY_SPAN: Span = Span { lo: 0, hi: 0 };
+
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 struct Span {
     lo: u32,
@@ -582,26 +545,6 @@ impl Group {
         }
     }
 
-    fn delimiter(&self) -> Delimiter {
-        self.delimiter
-    }
-
-    fn stream(&self) -> TokenStream {
-        self.stream.clone()
-    }
-
-    fn span(&self) -> Span {
-        self.span
-    }
-
-    fn span_open(&self) -> Span {
-        self.span
-    }
-
-    fn span_close(&self) -> Span {
-        self.span
-    }
-
     fn set_span(&mut self, span: Span) {
         self.span = span;
     }
@@ -616,11 +559,11 @@ impl fmt::Display for Group {
             Delimiter::None => ("", ""),
         };
 
-        f.write_str(left)?;
-        self.stream.fmt(f)?;
-        f.write_str(right)?;
-
-        Ok(())
+        if self.stream.is_empty() {
+            write!(f, "{} {}", left, right)
+        } else {
+            write!(f, "{} {} {}", left, self.stream, right)
+        }
     }
 }
 
@@ -651,11 +594,6 @@ impl Punct {
         }
     }
 
-    /// Returns the value of this punctuation character as `char`.
-    fn as_char(&self) -> char {
-        self.op
-    }
-
     /// Returns the spacing of this punctuation character, indicating whether
     /// it's immediately followed by another `Punct` in the token stream, so
     /// they can potentially be combined into a multicharacter operator
@@ -667,11 +605,6 @@ impl Punct {
         } else {
             Spacing::Alone
         }
-    }
-
-    /// Returns the span for this punctuation character.
-    fn span(&self) -> Span {
-        self.span
     }
 
     /// Configure the span for this punctuation character.
@@ -716,10 +649,6 @@ impl Ident {
         Ident::_new(string, true, span)
     }
 
-    fn span(&self) -> Span {
-        self.span
-    }
-
     fn set_span(&mut self, span: Span) {
         self.span = span;
     }
@@ -740,77 +669,12 @@ struct Literal {
     span: Span,
 }
 
-macro_rules! suffixed_numbers {
-    ($($name:ident => $kind:ident,)*) => ($(
-        fn $name(n: $kind) -> Literal {
-            Literal::_new(format!(concat!("{}", stringify!($kind)), n))
-        }
-    )*)
-}
-
-macro_rules! unsuffixed_numbers {
-    ($($name:ident => $kind:ident,)*) => ($(
-        fn $name(n: $kind) -> Literal {
-            Literal::_new(n.to_string())
-        }
-    )*)
-}
-
 impl Literal {
     fn _new(text: String) -> Literal {
         Literal {
             text,
             span: Span::call_site(),
         }
-    }
-
-    suffixed_numbers! {
-        u8_suffixed => u8,
-        u16_suffixed => u16,
-        u32_suffixed => u32,
-        u64_suffixed => u64,
-        u128_suffixed => u128,
-        usize_suffixed => usize,
-        i8_suffixed => i8,
-        i16_suffixed => i16,
-        i32_suffixed => i32,
-        i64_suffixed => i64,
-        i128_suffixed => i128,
-        isize_suffixed => isize,
-
-        f32_suffixed => f32,
-        f64_suffixed => f64,
-    }
-
-    unsuffixed_numbers! {
-        u8_unsuffixed => u8,
-        u16_unsuffixed => u16,
-        u32_unsuffixed => u32,
-        u64_unsuffixed => u64,
-        u128_unsuffixed => u128,
-        usize_unsuffixed => usize,
-        i8_unsuffixed => i8,
-        i16_unsuffixed => i16,
-        i32_unsuffixed => i32,
-        i64_unsuffixed => i64,
-        i128_unsuffixed => i128,
-        isize_unsuffixed => isize,
-    }
-
-    fn f32_unsuffixed(f: f32) -> Literal {
-        let mut s = f.to_string();
-        if !s.contains(".") {
-            s.push_str(".0");
-        }
-        Literal::_new(s)
-    }
-
-    fn f64_unsuffixed(f: f64) -> Literal {
-        let mut s = f.to_string();
-        if !s.contains(".") {
-            s.push_str(".0");
-        }
-        Literal::_new(s)
     }
 
     fn string(t: &str) -> Literal {
@@ -828,47 +692,8 @@ impl Literal {
         Literal::_new(text)
     }
 
-    fn character(t: char) -> Literal {
-        let mut text = String::new();
-        text.push('\'');
-        if t == '"' {
-            // escape_default turns this into '\"' which is unnecessary.
-            text.push(t);
-        } else {
-            text.extend(t.escape_default());
-        }
-        text.push('\'');
-        Literal::_new(text)
-    }
-
-    fn byte_string(bytes: &[u8]) -> Literal {
-        let mut escaped = "b\"".to_string();
-        for b in bytes {
-            match *b {
-                b'\0' => escaped.push_str(r"\0"),
-                b'\t' => escaped.push_str(r"\t"),
-                b'\n' => escaped.push_str(r"\n"),
-                b'\r' => escaped.push_str(r"\r"),
-                b'"' => escaped.push_str("\\\""),
-                b'\\' => escaped.push_str("\\\\"),
-                b'\x20'..=b'\x7E' => escaped.push(*b as char),
-                _ => escaped.push_str(&format!("\\x{:02X}", b)),
-            }
-        }
-        escaped.push('"');
-        Literal::_new(escaped)
-    }
-
-    fn span(&self) -> Span {
-        self.span
-    }
-
     fn set_span(&mut self, span: Span) {
         self.span = span;
-    }
-
-    fn subspan<R: RangeBounds<usize>>(&self, _range: R) -> Option<Span> {
-        None
     }
 }
 
@@ -878,14 +703,4 @@ impl fmt::Display for Literal {
     }
 }
 
-impl fmt::Debug for Literal {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.debug_struct("Literal")
-            .field("lit", &format_args!("{}", self.text))
-            .field("span", &self.span)
-            .finish()
-    }
-}
-
 struct Diagnostic {}
-
