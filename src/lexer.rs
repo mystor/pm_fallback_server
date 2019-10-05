@@ -507,19 +507,19 @@ named!(group -> Group, alt!(
         punct!("("),
         token_stream,
         punct!(")")
-    ) => { |ts| Group::new(Delimiter::Parenthesis, ts) }
+    ) => { |ts| Group::new(Delimiter::Parenthesis, ts, DUMMY_SPAN) }
     |
     delimited!(
         punct!("["),
         token_stream,
         punct!("]")
-    ) => { |ts| Group::new(Delimiter::Bracket, ts) }
+    ) => { |ts| Group::new(Delimiter::Bracket, ts, DUMMY_SPAN) }
     |
     delimited!(
         punct!("{"),
         token_stream,
         punct!("}")
-    ) => { |ts| Group::new(Delimiter::Brace, ts) }
+    ) => { |ts| Group::new(Delimiter::Brace, ts, DUMMY_SPAN) }
 ));
 
 fn symbol_leading_ws(input: Cursor) -> PResult<TokenTreeT> {
@@ -572,7 +572,10 @@ fn literal(input: Cursor) -> PResult<Literal> {
             let start = input.len() - input_no_ws.len();
             let len = input_no_ws.len() - a.len();
             let end = start + len;
-            Ok((a, Literal::new(input.rest[start..end].to_string(), DUMMY_SPAN)))
+            Ok((
+                a,
+                Literal::new(input.rest[start..end].to_string(), DUMMY_SPAN),
+            ))
         }
         Err(LexError) => Err(LexError),
     }
@@ -1023,25 +1026,24 @@ fn op_char(input: Cursor) -> PResult<char> {
 }
 
 fn doc_comment(input: Cursor) -> PResult<Vec<TokenTreeT>> {
-    let mut trees = Vec::new();
     let (rest, ((comment, inner), span)) = spanned(input, doc_comment_contents)?;
+
+    let mut trees = Vec::new();
     trees.push(TokenTree::Punct(Punct::new('#', Spacing::Alone, span)));
     if inner {
         trees.push(TokenTree::Punct(Punct::new('!', Spacing::Alone, span)));
     }
-    let mut stream = vec![
-        TokenTree::Ident(Ident::new("doc", false, span)),
-        TokenTree::Punct(Punct::new('=', Spacing::Alone, span)),
-        TokenTree::Literal(Literal::string(comment, span)),
-    ];
-    for tt in stream.iter_mut() {
-        set_tt_span(tt, span);
-    }
-    let group = Group::new(Delimiter::Bracket, TokenStream { inner: stream });
-    trees.push(TokenTree::Group(group));
-    for tt in trees.iter_mut() {
-        set_tt_span(tt, span);
-    }
+    trees.push(TokenTree::Group(Group::new(
+        Delimiter::Bracket,
+        TokenStream {
+            inner: vec![
+                TokenTree::Ident(Ident::new("doc", false, span)),
+                TokenTree::Punct(Punct::new('=', Spacing::Alone, span)),
+                TokenTree::Literal(Literal::string(comment, span)),
+            ],
+        },
+        span,
+    )));
     Ok((rest, trees))
 }
 

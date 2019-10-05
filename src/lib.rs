@@ -128,7 +128,7 @@ impl server::TokenStreamIter for Server {
 
 impl server::Group for Server {
     fn new(&mut self, delimiter: Delimiter, stream: Self::TokenStream) -> Self::Group {
-        Group::new(delimiter, stream)
+        Group::new(delimiter, stream, self.call_site)
     }
 
     fn delimiter(&mut self, group: &Self::Group) -> Delimiter {
@@ -194,7 +194,10 @@ impl server::Ident for Server {
 
 impl server::Literal for Server {
     fn debug(&mut self, literal: &Self::Literal) -> String {
-        format!("Literal {{ lit: {}, span: {:?} }}", literal.text, literal.span)
+        format!(
+            "Literal {{ lit: {}, span: {:?} }}",
+            literal.text, literal.span
+        )
     }
 
     fn integer(&mut self, n: &str) -> Self::Literal {
@@ -537,11 +540,11 @@ struct Group {
 }
 
 impl Group {
-    fn new(delimiter: Delimiter, stream: TokenStream) -> Group {
+    fn new(delimiter: Delimiter, stream: TokenStream, span: Span) -> Group {
         Group {
             delimiter,
             stream,
-            span: Span::call_site(),
+            span,
         }
     }
 
@@ -663,7 +666,7 @@ struct Literal {
 
 impl Literal {
     fn new(text: String, span: Span) -> Literal {
-        Literal {text, span}
+        Literal { text, span }
     }
 
     fn string(t: &str, span: Span) -> Literal {
