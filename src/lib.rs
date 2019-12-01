@@ -7,13 +7,13 @@
 
 extern crate proc_macro;
 
+use std::cell::Cell;
 use std::cmp;
 use std::fmt;
 use std::ops::Bound;
+use std::panic;
 use std::rc::Rc;
 use std::vec;
-use std::cell::Cell;
-use std::panic;
 
 use proc_macro::bridge::{client, server, TokenTree};
 use proc_macro::{Delimiter, Level, LineColumn, Spacing};
@@ -57,7 +57,7 @@ struct Server {
     source_map: SourceMap,
     def_site: Span,
     call_site: Span,
-    // mixed_site: Span,
+    mixed_site: Span,
 }
 
 impl Server {
@@ -72,7 +72,7 @@ impl Server {
             },
             def_site: DUMMY_SPAN,
             call_site: DUMMY_SPAN,
-            // mixed_site: DUMMY_SPAN,
+            mixed_site: DUMMY_SPAN,
         }
     }
 }
@@ -232,7 +232,7 @@ impl server::Literal for Server {
     fn float(&mut self, n: &str) -> Self::Literal {
         let mut s = n.to_string();
         if !s.contains(".") {
-            s.push_str(".9");
+            s.push_str(".0");
         }
         Literal::new(s, self.call_site)
     }
@@ -324,7 +324,11 @@ impl server::MultiSpan for Server {
 
 impl server::Diagnostic for Server {
     fn new(&mut self, level: Level, msg: &str, _spans: Self::MultiSpan) -> Self::Diagnostic {
-        Diagnostic { level, msg: msg.to_string(), children: Vec::new() }
+        Diagnostic {
+            level,
+            msg: msg.to_string(),
+            children: Vec::new(),
+        }
     }
 
     fn sub(
@@ -362,11 +366,9 @@ impl server::Span for Server {
         self.call_site
     }
 
-    /*
     fn mixed_site(&mut self) -> Self::Span {
         self.mixed_site
     }
-     */
 
     fn source_file(&mut self, span: Self::Span) -> Self::SourceFile {
         self.source_map.fileinfo(span).clone()
@@ -406,7 +408,7 @@ impl server::Span for Server {
     }
 
     fn source_text(&mut self, _span: Self::Span) -> Option<String> {
-        None  // NOTE: Consider keeping track of source text we've been asked to parse?
+        None // NOTE: Consider keeping track of source text we've been asked to parse?
     }
 }
 

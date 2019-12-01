@@ -8,9 +8,7 @@ fn basic() {
         let ts = proc_macro::TokenStream::new();
         println!("{}", ts);
 
-        let ts2 : proc_macro::TokenStream = "hello world, this is Nika!".parse().unwrap();
+        let ts2: proc_macro::TokenStream = "hello world, this is Nika!".parse().unwrap();
         println!("{}", ts2);
     });
 }
-
-
