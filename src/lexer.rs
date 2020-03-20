@@ -2,7 +2,10 @@ use std::iter;
 use std::mem;
 use std::vec;
 
-use crate::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree, Server};
+use crate::{
+    DelimSpan, Delimiter, Group, Ident, Literal, Punct, Server, Spacing, Span, TokenStream,
+    TokenTree,
+};
 use rustc_lexer::{first_token, is_id_continue, is_id_start, TokenKind};
 
 fn tokenize(mut input: &str, mut lo: u32) -> impl Iterator<Item = (TokenKind, &str, Span)> + '_ {
@@ -41,7 +44,7 @@ fn doc_attr(
                 TokenTree::Literal(Literal::string(server, doc, span)),
             ],
         },
-        span,
+        span: DelimSpan::from_single(span),
     }))
 }
 
@@ -81,7 +84,7 @@ pub(crate) fn lex_stream(server: &mut Server, src: &str, lo: u32) -> Result<Toke
                     _ => unreachable!(),
                 };
                 let parent = mem::replace(&mut active, Vec::new());
-                stack.push((delimiter, parent));
+                stack.push((delimiter, parent, span));
             }
 
             TokenKind::CloseParen | TokenKind::CloseBrace | TokenKind::CloseBracket => {
@@ -91,7 +94,7 @@ pub(crate) fn lex_stream(server: &mut Server, src: &str, lo: u32) -> Result<Toke
                     TokenKind::CloseBracket => Delimiter::Bracket,
                     _ => unreachable!(),
                 };
-                let (delimiter, parent) = stack.pop().ok_or(())?;
+                let (delimiter, parent, open_span) = stack.pop().ok_or(())?;
                 if delimiter != expected {
                     return Err(());
                 }
@@ -99,7 +102,10 @@ pub(crate) fn lex_stream(server: &mut Server, src: &str, lo: u32) -> Result<Toke
                 let inner = mem::replace(&mut active, parent);
                 active.push(TokenTree::Group(Group {
                     delimiter,
-                    span,
+                    span: DelimSpan {
+                        open: open_span,
+                        close: span,
+                    },
                     stream: TokenStream { inner },
                 }));
             }
@@ -115,7 +121,12 @@ pub(crate) fn lex_stream(server: &mut Server, src: &str, lo: u32) -> Result<Toke
             }
             TokenKind::Lifetime { .. } => {
                 active.push(TokenTree::Punct(Punct::new('\'', Spacing::Joint, span)));
-                active.push(TokenTree::Ident(Ident::new(server, &text[1..], false, span)));
+                active.push(TokenTree::Ident(Ident::new(
+                    server,
+                    &text[1..],
+                    false,
+                    span,
+                )));
             }
 
             TokenKind::Semi

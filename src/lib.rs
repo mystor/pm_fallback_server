@@ -158,7 +158,7 @@ impl server::TokenStreamIter for Server {
 
 impl server::Group for Server {
     fn new(&mut self, delimiter: Delimiter, stream: Self::TokenStream) -> Self::Group {
-        Group::new(delimiter, stream, self.call_site)
+        Group::new(delimiter, stream, DelimSpan::from_single(self.call_site))
     }
 
     fn delimiter(&mut self, group: &Self::Group) -> Delimiter {
@@ -170,15 +170,15 @@ impl server::Group for Server {
     }
 
     fn span(&mut self, group: &Self::Group) -> Self::Span {
-        group.span
+        group.span.entire()
     }
 
     fn span_open(&mut self, group: &Self::Group) -> Self::Span {
-        group.span // FIXME: Generate correct span
+        group.span.open
     }
 
     fn span_close(&mut self, group: &Self::Group) -> Self::Span {
-        group.span // FIXME: Generate correct span
+        group.span.close
     }
 
     fn set_span(&mut self, group: &mut Self::Group, span: Self::Span) {
@@ -565,15 +565,37 @@ impl fmt::Debug for Span {
     }
 }
 
+#[derive(Copy, Clone)]
+struct DelimSpan {
+    open: Span,
+    close: Span,
+}
+
+impl DelimSpan {
+    fn from_single(span: Span) -> Self {
+        DelimSpan {
+            open: span,
+            close: span,
+        }
+    }
+
+    fn entire(&self) -> Span {
+        Span {
+            lo: self.open.lo,
+            hi: self.close.hi,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Group {
     delimiter: Delimiter,
     stream: TokenStream,
-    span: Span,
+    span: DelimSpan,
 }
 
 impl Group {
-    fn new(delimiter: Delimiter, stream: TokenStream, span: Span) -> Group {
+    fn new(delimiter: Delimiter, stream: TokenStream, span: DelimSpan) -> Group {
         Group {
             delimiter,
             stream,
@@ -582,7 +604,7 @@ impl Group {
     }
 
     fn set_span(&mut self, span: Span) {
-        self.span = span;
+        self.span = DelimSpan::from_single(span);
     }
 
     fn display(&self, server: &mut Server, f: &mut impl fmt::Write) -> fmt::Result {
