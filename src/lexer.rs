@@ -2,7 +2,7 @@ use std::iter;
 use std::mem;
 use std::vec;
 
-use crate::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
+use crate::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree, Server};
 use rustc_lexer::{first_token, is_id_continue, is_id_start, TokenKind};
 
 fn tokenize(mut input: &str, mut lo: u32) -> impl Iterator<Item = (TokenKind, &str, Span)> + '_ {
@@ -22,6 +22,7 @@ fn tokenize(mut input: &str, mut lo: u32) -> impl Iterator<Item = (TokenKind, &s
 }
 
 fn doc_attr(
+    server: &mut Server,
     tts: &mut Vec<TokenTree<Group, Punct, Ident, Literal>>,
     doc: &str,
     inner: bool,
@@ -35,16 +36,16 @@ fn doc_attr(
         delimiter: Delimiter::Brace,
         stream: TokenStream {
             inner: vec![
-                TokenTree::Ident(Ident::new("doc", false, span)),
+                TokenTree::Ident(Ident::new(server, "doc", false, span)),
                 TokenTree::Punct(Punct::new('=', Spacing::Alone, span)),
-                TokenTree::Literal(Literal::string(doc, span)),
+                TokenTree::Literal(Literal::string(server, doc, span)),
             ],
         },
         span,
     }))
 }
 
-pub(crate) fn lex_stream(src: &str, lo: u32) -> Result<TokenStream, ()> {
+pub(crate) fn lex_stream(server: &mut Server, src: &str, lo: u32) -> Result<TokenStream, ()> {
     let mut stack = Vec::new();
     let mut active = Vec::new();
 
@@ -55,9 +56,9 @@ pub(crate) fn lex_stream(src: &str, lo: u32) -> Result<TokenStream, ()> {
 
             TokenKind::LineComment => {
                 if text.starts_with("//!") {
-                    doc_attr(&mut active, &text[3..], true, span);
+                    doc_attr(server, &mut active, &text[3..], true, span);
                 } else if text.starts_with("///") && !text.starts_with("////") {
-                    doc_attr(&mut active, &text[3..], false, span);
+                    doc_attr(server, &mut active, &text[3..], false, span);
                 }
             }
             TokenKind::BlockComment { terminated: false } => return Err(()),
@@ -66,9 +67,9 @@ pub(crate) fn lex_stream(src: &str, lo: u32) -> Result<TokenStream, ()> {
                 // appear to handle block doc-comments correctly in any fallback
                 // implementations, so this is about as correct as proc-macro2.
                 if text.starts_with("/*!") {
-                    doc_attr(&mut active, &text[3..text.len() - 2], true, span);
+                    doc_attr(server, &mut active, &text[3..text.len() - 2], true, span);
                 } else if text.starts_with("/**") {
-                    doc_attr(&mut active, &text[3..text.len() - 2], false, span);
+                    doc_attr(server, &mut active, &text[3..text.len() - 2], false, span);
                 }
             }
 
@@ -104,17 +105,17 @@ pub(crate) fn lex_stream(src: &str, lo: u32) -> Result<TokenStream, ()> {
             }
 
             TokenKind::Ident => {
-                active.push(TokenTree::Ident(Ident::new(text, false, span)));
+                active.push(TokenTree::Ident(Ident::new(server, text, false, span)));
             }
             TokenKind::RawIdent => {
-                active.push(TokenTree::Ident(Ident::new(&text[2..], true, span)));
+                active.push(TokenTree::Ident(Ident::new(server, &text[2..], true, span)));
             }
             TokenKind::Literal { .. } => {
-                active.push(TokenTree::Literal(Literal::new(text.to_owned(), span)));
+                active.push(TokenTree::Literal(Literal::new(server, text, span)));
             }
             TokenKind::Lifetime { .. } => {
                 active.push(TokenTree::Punct(Punct::new('\'', Spacing::Joint, span)));
-                active.push(TokenTree::Ident(Ident::new(&text[1..], false, span)));
+                active.push(TokenTree::Ident(Ident::new(server, &text[1..], false, span)));
             }
 
             TokenKind::Semi

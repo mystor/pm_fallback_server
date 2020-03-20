@@ -19,6 +19,9 @@ use proc_macro::bridge::{client, server, TokenTree};
 use proc_macro::{Delimiter, Level, LineColumn, Spacing};
 
 mod lexer;
+mod symbol;
+
+use symbol::{Interner, Symbol};
 
 // Hacky thread local and client set-up to work around the limited internal API
 // used by proc_macro.
@@ -55,6 +58,7 @@ pub fn run_server<F: FnOnce() + 'static>(f: F) {
 // The internal `Server` type.
 struct Server {
     source_map: SourceMap,
+    interner: Interner,
     def_site: Span,
     call_site: Span,
     mixed_site: Span,
@@ -70,6 +74,7 @@ impl Server {
                     lines: vec![0],
                 })],
             },
+            interner: Interner::new(),
             def_site: DUMMY_SPAN,
             call_site: DUMMY_SPAN,
             mixed_site: DUMMY_SPAN,
@@ -103,11 +108,15 @@ impl server::TokenStream for Server {
     fn from_str(&mut self, src: &str) -> Self::TokenStream {
         let name = format!("<parsed string {}>", self.source_map.files.len());
         let span = self.source_map.add_file(&name, src);
-        lexer::lex_stream(src, span.lo).expect("error while lexing")
+        lexer::lex_stream(self, src, span.lo).expect("error while lexing")
     }
 
     fn to_string(&mut self, stream: &Self::TokenStream) -> String {
-        stream.to_string()
+        let mut string = String::new();
+        stream
+            .display(self, &mut string)
+            .expect("error formatting TokenStream");
+        string
     }
 
     fn from_token_tree(
@@ -201,7 +210,7 @@ impl server::Punct for Server {
 
 impl server::Ident for Server {
     fn new(&mut self, string: &str, span: Self::Span, is_raw: bool) -> Self::Ident {
-        Ident::new(string, is_raw, span)
+        Ident::new(self, string, is_raw, span)
     }
 
     fn span(&mut self, ident: Self::Ident) -> Self::Span {
@@ -217,16 +226,17 @@ impl server::Literal for Server {
     fn debug(&mut self, literal: &Self::Literal) -> String {
         format!(
             "Literal {{ lit: {}, span: {:?} }}",
-            literal.text, literal.span
+            self.interner.get(literal.sym),
+            literal.span
         )
     }
 
     fn integer(&mut self, n: &str) -> Self::Literal {
-        Literal::new(format!("{}", n), self.call_site)
+        Literal::new(self, &format!("{}", n), self.call_site)
     }
 
     fn typed_integer(&mut self, n: &str, kind: &str) -> Self::Literal {
-        Literal::new(format!("{}{}", n, kind), self.call_site)
+        Literal::new(self, &format!("{}{}", n, kind), self.call_site)
     }
 
     fn float(&mut self, n: &str) -> Self::Literal {
@@ -234,19 +244,19 @@ impl server::Literal for Server {
         if !s.contains(".") {
             s.push_str(".0");
         }
-        Literal::new(s, self.call_site)
+        Literal::new(self, &s, self.call_site)
     }
 
     fn f32(&mut self, n: &str) -> Self::Literal {
-        Literal::new(format!("{}f32", n), self.call_site)
+        Literal::new(self, &format!("{}f32", n), self.call_site)
     }
 
     fn f64(&mut self, n: &str) -> Self::Literal {
-        Literal::new(format!("{}f64", n), self.call_site)
+        Literal::new(self, &format!("{}f64", n), self.call_site)
     }
 
     fn string(&mut self, string: &str) -> Self::Literal {
-        Literal::string(string, self.call_site)
+        Literal::string(self, string, self.call_site)
     }
 
     fn character(&mut self, ch: char) -> Self::Literal {
@@ -259,7 +269,7 @@ impl server::Literal for Server {
             text.extend(ch.escape_default());
         }
         text.push('\'');
-        Literal::new(text, self.call_site)
+        Literal::new(self, &text, self.call_site)
     }
 
     fn byte_string(&mut self, bytes: &[u8]) -> Self::Literal {
@@ -277,7 +287,7 @@ impl server::Literal for Server {
             }
         }
         escaped.push('"');
-        Literal::new(escaped, self.call_site)
+        Literal::new(self, &escaped, self.call_site)
     }
 
     fn span(&mut self, literal: &Self::Literal) -> Self::Span {
@@ -431,27 +441,25 @@ impl TokenStream {
     fn is_empty(&self) -> bool {
         self.inner.len() == 0
     }
-}
 
-impl fmt::Display for TokenStream {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn display(&self, server: &mut Server, f: &mut impl fmt::Write) -> fmt::Result {
         let mut joint = false;
         for (i, tt) in self.inner.iter().enumerate() {
             if i != 0 && !joint {
                 write!(f, " ")?;
             }
             joint = false;
-            match *tt {
-                TokenTree::Group(ref tt) => write!(f, "{}", tt)?,
-                TokenTree::Ident(ref tt) => write!(f, "{}", tt)?,
-                TokenTree::Punct(ref tt) => {
-                    write!(f, "{}", tt.op)?;
+            match tt {
+                TokenTree::Group(tt) => tt.display(server, f)?,
+                TokenTree::Ident(tt) => tt.display(server, f)?,
+                TokenTree::Punct(tt) => {
+                    tt.display(server, f)?;
                     match tt.spacing() {
                         Spacing::Alone => {}
                         Spacing::Joint => joint = true,
                     }
                 }
-                TokenTree::Literal(ref tt) => write!(f, "{}", tt)?,
+                TokenTree::Literal(tt) => tt.display(server, f)?,
             }
         }
 
@@ -576,10 +584,8 @@ impl Group {
     fn set_span(&mut self, span: Span) {
         self.span = span;
     }
-}
 
-impl fmt::Display for Group {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn display(&self, server: &mut Server, f: &mut impl fmt::Write) -> fmt::Result {
         let (left, right) = match self.delimiter {
             Delimiter::Parenthesis => ("(", ")"),
             Delimiter::Brace => ("{", "}"),
@@ -590,7 +596,9 @@ impl fmt::Display for Group {
         if self.stream.is_empty() {
             write!(f, "{} {}", left, right)
         } else {
-            write!(f, "{} {} {}", left, self.stream, right)
+            write!(f, "{} ", left)?;
+            self.stream.display(server, f)?;
+            write!(f, " {}", right)
         }
     }
 }
@@ -618,58 +626,50 @@ impl Punct {
             Spacing::Alone
         }
     }
-}
 
-/// Prints the punctuation character as a string that should be losslessly
-/// convertible back into the same character.
-impl fmt::Display for Punct {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.op.fmt(f)
+    /// Prints the punctuation character as a string that should be losslessly
+    /// convertible back into the same character.
+    fn display(&self, _server: &mut Server, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "{}", self.op)
     }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 struct Ident {
-    // sym: String,
-    sym: u32,
+    sym: Symbol,
     span: Span,
     raw: bool,
 }
 
 impl Ident {
-    fn new(string: &str, raw: bool, span: Span) -> Ident {
+    fn new(server: &mut Server, string: &str, raw: bool, span: Span) -> Ident {
         lexer::validate_ident(string);
 
-        Ident {
-            // sym: string.to_owned(),
-            sym: 0,
-            span,
-            raw,
-        }
+        let sym = server.interner.intern(string);
+        Ident { sym, span, raw }
     }
-}
 
-impl fmt::Display for Ident {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn display(&self, server: &mut Server, f: &mut impl fmt::Write) -> fmt::Result {
         if self.raw {
-            "r#".fmt(f)?;
+            write!(f, "r#")?;
         }
-        self.sym.fmt(f)
+        write!(f, "{}", server.interner.get(self.sym))
     }
 }
 
 #[derive(Clone)]
 struct Literal {
-    text: String,
+    sym: Symbol,
     span: Span,
 }
 
 impl Literal {
-    fn new(text: String, span: Span) -> Literal {
-        Literal { text, span }
+    fn new(server: &mut Server, text: &str, span: Span) -> Literal {
+        let sym = server.interner.intern(text);
+        Literal { sym, span }
     }
 
-    fn string(t: &str, span: Span) -> Literal {
+    fn string(server: &mut Server, t: &str, span: Span) -> Literal {
         let mut text = String::with_capacity(t.len() + 2);
         text.push('"');
         for c in t.chars() {
@@ -681,13 +681,11 @@ impl Literal {
             }
         }
         text.push('"');
-        Literal::new(text, span)
+        Literal::new(server, &text, span)
     }
-}
 
-impl fmt::Display for Literal {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.text.fmt(f)
+    fn display(&self, server: &mut Server, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "{}", server.interner.get(self.sym))
     }
 }
 
