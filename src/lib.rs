@@ -9,6 +9,7 @@ extern crate proc_macro;
 
 use std::cell::Cell;
 use std::cmp;
+use std::convert::TryInto;
 use std::fmt;
 use std::ops::Bound;
 use std::panic;
@@ -192,7 +193,7 @@ impl server::Punct for Server {
     }
 
     fn as_char(&mut self, punct: Self::Punct) -> char {
-        punct.op
+        punct.ch
     }
 
     fn spacing(&mut self, punct: Self::Punct) -> Spacing {
@@ -300,11 +301,35 @@ impl server::Literal for Server {
 
     fn subspan(
         &mut self,
-        _literal: &Self::Literal,
-        _start: Bound<usize>,
-        _end: Bound<usize>,
+        literal: &Self::Literal,
+        start: Bound<usize>,
+        end: Bound<usize>,
     ) -> Option<Self::Span> {
-        None // FIXME: Support this
+        let span = literal.span;
+        let length = span.hi - span.lo;
+
+        let start = match start {
+            Bound::Included(lo) => lo,
+            Bound::Excluded(lo) => lo + 1,
+            Bound::Unbounded => 0,
+        };
+        let start: u32 = start.try_into().ok()?;
+
+        let end = match end {
+            Bound::Included(hi) => hi + 1,
+            Bound::Excluded(hi) => hi,
+            Bound::Unbounded => length as usize,
+        };
+        let end: u32 = end.try_into().ok()?;
+
+        if start >= end || end > length {
+            return None;
+        }
+
+        Some(Span {
+            lo: span.lo.checked_add(start)?,
+            hi: span.hi.checked_add(end)?,
+        })
     }
 }
 
@@ -526,11 +551,10 @@ impl SourceMap {
     fn add_file(&mut self, name: &str, src: &str) -> Span {
         let lines = lines_offsets(src);
         let lo = self.next_start_pos();
-        // XXX(nika): Shouild we bother doing a checked cast or checked add here?
-        let span = Span {
-            lo,
-            hi: lo + (src.len() as u32),
-        };
+        let hi = lo
+            .checked_add(src.len().try_into().expect("source text too long"))
+            .expect("overflow parsing source text");
+        let span = Span { lo, hi };
 
         self.files.push(Rc::new(FileInfo {
             name: name.to_owned(),
@@ -547,7 +571,7 @@ impl SourceMap {
                 return file;
             }
         }
-        panic!("Invalid span with no related FileInfo!");
+        panic!("invalid span with no related FileInfo");
     }
 }
 
@@ -627,15 +651,22 @@ impl Group {
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 struct Punct {
-    op: char,
+    ch: char,
     joint: bool, // Spacing is not `Hash`
     span: Span,
 }
 
 impl Punct {
-    fn new(op: char, spacing: Spacing, span: Span) -> Punct {
+    fn new(ch: char, spacing: Spacing, span: Span) -> Punct {
+        const LEGAL_CHARS: &[char] = &[
+            '=', '<', '>', '!', '~', '+', '-', '*', '/', '%', '^', '&', '|', '@', '.', ',', ';',
+            ':', '#', '$', '?', '\'',
+        ];
+        if !LEGAL_CHARS.contains(&ch) {
+            panic!("unsupported character `{:?}`", ch)
+        }
         Punct {
-            op,
+            ch,
             joint: spacing == Spacing::Joint,
             span,
         }
@@ -652,7 +683,7 @@ impl Punct {
     /// Prints the punctuation character as a string that should be losslessly
     /// convertible back into the same character.
     fn display(&self, _server: &mut Server, f: &mut impl fmt::Write) -> fmt::Result {
-        write!(f, "{}", self.op)
+        write!(f, "{}", self.ch)
     }
 }
 
